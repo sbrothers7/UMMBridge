@@ -280,6 +280,12 @@ namespace UMMBridge
             try { files = Directory.GetFiles(ModsRootPath, "*.dll", SearchOption.AllDirectories); }
             catch { return; }
 
+            // One index of the loaded types for the whole scan.  AccessTools.TypeByName
+            // walks every loaded type on a lookup that is not assembly-qualified, and
+            // logs a warning on a miss — and misses are normal here (another game
+            // version's class, a mod not installed or not loaded yet), so per-attribute
+            // lookups cost ~0.4 s each: 18 s for PACL2 + BetterCalibration.
+            var types = new Lazy<Dictionary<string, Type>>(IndexLoadedTypes);
             var claimed = new HashSet<string>();
             foreach (var file in files)
             {
@@ -304,15 +310,13 @@ namespace UMMBridge
 
                                 // [JAPatch(Type or string class, string method, PatchType, bool)]
                                 var args = attr.ConstructorArguments;
-                                var typeName = args[0].Value switch
+                                if (args[1].Value is not string methodName) continue;
+                                var target = args[0].Value switch
                                 {
-                                    TypeReference t => t.FullName.Replace('/', '+'),
-                                    string s => s,
+                                    TypeReference t => ResolveClaimType(t, types.Value),
+                                    string name => ResolveClaimType(name, types.Value),
                                     _ => null,
                                 };
-                                if (typeName == null || args[1].Value is not string methodName) continue;
-
-                                var target = HarmonyLib.AccessTools.TypeByName(typeName);
                                 if (target == null) continue;
 
                                 // ponytail: claims every overload of that name (ArgumentTypes and
@@ -339,6 +343,48 @@ namespace UMMBridge
                     $"Claimed {claimed.Count} method(s) for JALib on 0Harmony_UMM: " +
                     string.Join(", ", claimed));
         }
+
+        /// <summary>
+        /// Every loaded type by full name, then by short name where that is free:
+        /// the same two passes AccessTools.TypeByName makes, done once.
+        /// </summary>
+        private static Dictionary<string, Type> IndexLoadedTypes()
+        {
+            var all = new List<Type>();
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { all.AddRange(assembly.GetTypes()); }
+                catch (ReflectionTypeLoadException e) { all.AddRange(e.Types.Where(t => t != null)); }
+                catch { }
+            }
+
+            var index = new Dictionary<string, Type>();
+            foreach (var type in all)
+                if (type.FullName != null && !index.ContainsKey(type.FullName)) index[type.FullName] = type;
+            foreach (var type in all)
+                if (!index.ContainsKey(type.Name)) index[type.Name] = type;
+            return index;
+        }
+
+        /// <summary>A [JAPatch] typeof() target; null when it is not loaded.</summary>
+        internal static Type ResolveClaimType(TypeReference type, Dictionary<string, Type> index)
+        {
+            if (type is GenericInstanceType generic)
+            {
+                var definition = ResolveClaimType(generic.ElementType, index);
+                var arguments = generic.GenericArguments.Select(a => ResolveClaimType(a, index)).ToArray();
+                if (definition == null || arguments.Any(a => a == null)) return null;
+                try { return definition.MakeGenericType(arguments); }
+                catch (ArgumentException) { return null; }
+            }
+
+            return index.TryGetValue(type.FullName.Replace('/', '+'), out var found) ? found : null;
+        }
+
+        /// <summary>A [JAPatch] class-name target; null when it is not loaded.</summary>
+        internal static Type ResolveClaimType(string name, Dictionary<string, Type> index)
+            => index.TryGetValue(name, out var found) ? found
+                : name.Contains(',') ? Type.GetType(name, false) : null;
 
         // ── Cecil assembly resolution ───────────────────────────────────
 
