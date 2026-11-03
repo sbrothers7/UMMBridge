@@ -27,10 +27,11 @@ public class Bridge : MelonPlugin
     /// <summary>
     /// Extra routing diagnostics.  Off by default: the conflict check runs for
     /// every patch job, and one message per job floods the MelonLoader log.
-    /// Enable with the UMMBRIDGE_VERBOSE=1 environment variable.
+    /// Enable with the UMMBRIDGE_VERBOSE=1 environment variable, or
+    /// Verbose=true in UMMBridge.cfg.
     /// </summary>
     internal static readonly bool Verbose =
-        Environment.GetEnvironmentVariable("UMMBRIDGE_VERBOSE") == "1";
+        TranspilerBridge.ReadSetting("UMMBRIDGE_VERBOSE", "Verbose", false);
 
     internal static void Trace(string message)
     {
@@ -68,21 +69,38 @@ public class Bridge : MelonPlugin
         // A RuntimeDetour Detour would join HarmonyX's chain instead.
         lock (NativeDetours)
         {
-            if (NativeDetours.TryGetValue(original, out var previous)) previous.Dispose();
+            if (NativeDetours.TryGetValue(original, out var previous))
+            {
+                Trace($"detour {Describe(original)}: undoing previous");
+                previous.Dispose();
+            }
+            Trace($"detour {Describe(original)}: writing");
             NativeDetours[original] = new NativeDetour(original, replacement);
+            Trace($"detour {Describe(original)}: done");
         }
     }
 
     /// <summary>
     /// The body of 0Harmony_UMM's AccessTools.Identifiable() (Cecil-replaced).
-    /// On Mono, MonoMod.Core only maps a method to the instance it pinned for a
-    /// detour — none now — and otherwise drops the ReflectedType, so a method
-    /// looked up through a derived type keys the same patch state.
+    /// Same two steps as MonoMod.Core's: map a method to the instance the
+    /// detour engine pinned for it — now RuntimeDetour's map — then drop the
+    /// ReflectedType, so a method looked up through a derived type keys the
+    /// same patch state.
+    ///
+    /// <para>The first step also creates a DynamicMethod's runtime handle.
+    /// 2.3's UpdatePatchInfo calls this on a fresh replacement and right after
+    /// reads replacement.MethodHandle.GetFunctionPointer(); on Mono a
+    /// never-created DynamicMethod has a zero handle there and the runtime
+    /// segfaults.  A detour normally creates it first, but a refused one does
+    /// not — JALib unpatching a HarmonyX-owned method crashed the game.</para>
     /// </summary>
     public static MethodInfo Identifiable(MethodInfo method)
-        => method?.DeclaringType is { } type && method.ReflectedType != type
-            ? MethodBase.GetMethodFromHandle(method.MethodHandle, type.TypeHandle) as MethodInfo ?? method
-            : method;
+    {
+        var id = DetourHelper.GetIdentifiable(method) as MethodInfo ?? method;
+        return id.DeclaringType is { } type && id.ReflectedType != type
+            ? MethodBase.GetMethodFromHandle(id.MethodHandle, type.TypeHandle) as MethodInfo ?? id
+            : id;
+    }
 
     /// <summary>
     /// Returns false to skip a native detour when HarmonyX already owns the
