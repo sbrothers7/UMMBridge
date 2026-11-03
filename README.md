@@ -14,9 +14,17 @@ UMM ships **0Harmony 2.3.6** (with its own MonoMod) while MelonLoader uses **Har
 
 | Layer | Trigger | Behavior |
 |-------|---------|----------|
-| **Cecil rewriting** | Assembly load (`LoadFrom` interception) | Renames `0Harmony`→`0Harmony_UMM`, rewrites `Patch()` calls to `ProxyPatch` (transpiler assemblies included) |
-| **UpdateWrapper injection** | `CreateClassProcessor`/`PatchAll` path | IL injection at `PatchFunctions.UpdateWrapper()`: in bridge mode a mod patch job is routed to HarmonyX unless that method is already claimed natively |
-| **Harmony.Patch() prefix** | Direct `Harmony.Patch()` calls | HarmonyX prefix on `0Harmony_UMM.Harmony.Patch()`: converts a mod transpiler to HarmonyX, keeps UMM's own core patches native, and joins the native patch table instead of adding a second detour |
+| **Cecil rewriting** | Assembly load (`LoadFrom` interception) | Renames `0Harmony`→`0Harmony_UMM`, rewrites `Patch()` calls to `ProxyPatch`, which fixes a cross-runtime `MethodBase` and patches through 0Harmony_UMM |
+| **UpdateWrapper injection** | Every patch and unpatch (`Patch()`, `PatchAll`, `Unpatch`) | IL injection at `PatchFunctions.UpdateWrapper()`: picks the one runtime that owns the method entry. In bridge mode a mod's method goes to HarmonyX unless it is already claimed natively |
+| **Registry sync** | `HarmonySharedState.UpdatePatchInfo()` and the routed UpdateWrapper | For a method HarmonyX owns, makes HarmonyX's patches match 0Harmony_UMM's record (see below) |
+
+### One registry
+
+0Harmony_UMM's patch record is the only registry for UMM-side patches: `Patch()`, `PatchAll`, `Unpatch`, `UnpatchAll`, `GetPatchInfo` and owner queries all go through it, and so does JALib. For a method whose entry HarmonyX owns, the bridge mirrors that record onto HarmonyX, per owner and patch kind:
+
+- each patch is registered on HarmonyX under its **real Harmony id**, so `HarmonyBefore`/`HarmonyAfter` between mods and owner queries on either side work;
+- transpilers go through `TranspilerBridge`, and the same wrapper is reused for the same transpiler;
+- when a mod unpatches (or turns off), its patches leave HarmonyX too. Only the owner/kind groups that changed are re-applied, and patches other MelonLoader mods put on HarmonyX are never touched.
 
 ### One detour engine
 
@@ -25,7 +33,7 @@ UMM ships **0Harmony 2.3.6** (with its own MonoMod) while MelonLoader uses **Har
 ### Patch routing
 
 - **Transpilers (bridge enabled, default)** — `TranspilerBridge` converts `IEnumerable<CodeInstruction>` in both directions: the mod's transpiler still runs against 0Harmony_UMM's own `CodeInstruction` objects, while its patch is registered on **HarmonyX** together with every other patch for that method. Labels and operands are preserved; exception blocks are converted on a best-effort basis. If the method entry is *already* owned natively (a core patch got there first), the patch joins that native table instead — one detour either way.
-- **Non-transpiler patches** — Cecil-rewritten via `ProxyPatch`, applied through **HarmonyX** on a free entry, or joined to the existing native table when the entry is already native.
+- **Non-transpiler patches** — recorded by 0Harmony_UMM, applied through **HarmonyX** on a free entry, or joined to the existing native table when the entry is already native.
 - **Native runtime** — UMM's own core patches, methods already claimed natively by a core patch, or any patch when the bridge is disabled.
 - **No migration** — there is no path that moves patches between the two runtimes. HarmonyX's `ManagedMethodPatcher.DetourTo()` re-applies its ILHook even after the method is unpatched, so a migration would leave that detour behind and stack a second JMP on the same prologue. The bridge picks a runtime per method up front instead.
 - **Fallback** — If a transpiler cannot be wrapped (unsupported parameter, non-static method, generation failure), the reason is logged; the patch then joins the native table when 0Harmony_UMM already owns the entry, and is skipped with that reason when only HarmonyX owns it (writing a second detour is never an option).
@@ -69,6 +77,7 @@ Two MonoMod runtimes (HarmonyX and 0Harmony_UMM) still **cannot** both write JMP
 
 - **UMM core patches stay native** — A method already claimed by a native core patch cannot also receive a HarmonyX detour. Later mod patches join that native table (transpilers included) instead of getting a detour of their own; a patch whose transpiler cannot be wrapped is skipped with a logged reason when only HarmonyX owns the entry.
 - **Bridge scope** — `TranspilerBridge` converts `CodeInstruction` streams (opcode, operand, labels, exception blocks). The transpiler still executes against 0Harmony_UMM objects by design; a transpiler whose signature cannot be bound is logged and handled by the same runtime rule: it joins the native table when 0Harmony_UMM already owns the entry, and is skipped with that reason when only HarmonyX owns it.
+- **JALib's own patch types** — JALib's Replace, TryPrefix, Override and Remove patches have no HarmonyX form. On a method HarmonyX owns they are not applied; the methods JALib mods declare with `[JAPatch]` are claimed natively at startup so this does not arise for them.
 - **No perfect coexistence** — There is no way to make a HarmonyX‑based patch and a 0Harmony_UMM‑based patch both apply to the same method entry simultaneously. The design prioritizes stability over universal coexistence.
 
 ## Usage

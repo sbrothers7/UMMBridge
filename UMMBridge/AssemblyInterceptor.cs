@@ -337,10 +337,6 @@ namespace UMMBridge
                     $"HarmonyX-only mode ({harmonyXOnlyReason}): UMM mods keep their 0Harmony reference " +
                     "and patch through MelonLoader's HarmonyX");
             }
-            else
-            {
-                HookUmmHarmonyPatch();
-            }
 
             try
             {
@@ -370,49 +366,6 @@ namespace UMMBridge
         /// (JALib) or the few 2.3 APIs HarmonyX lacks do not work in this mode.
         /// </summary>
         internal static bool HarmonyXOnly { get; private set; }
-
-        /// <summary>
-        /// Hook 0Harmony_UMM's Harmony.Patch() via HarmonyX prefix.
-        /// Prefix_UMMPatch hands the patch to HarmonyX whenever HarmonyX
-        /// already owns the method entry (and for a UMM mod patch that
-        /// carries a transpiler), so both runtimes' patches coexist on one
-        /// detour instead of racing for the same JMP.
-        /// </summary>
-        private static void HookUmmHarmonyPatch()
-        {
-            try
-            {
-                var ummHarmonyType = _ummHarmony.GetType("HarmonyLib.Harmony");
-                if (ummHarmonyType != null)
-                {
-                    var patchMethod = ummHarmonyType.GetMethod("Patch", new[] {
-                        typeof(MethodBase),
-                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod"),
-                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod"),
-                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod"),
-                        ummHarmonyType.Assembly.GetType("HarmonyLib.HarmonyMethod")
-                    });
-                    if (patchMethod != null)
-                    {
-                        var bridgePrefix = typeof(Bridge).GetMethod(
-                            nameof(Bridge.Prefix_UMMPatch),
-                            BindingFlags.Public | BindingFlags.Static);
-                        if (bridgePrefix != null)
-                        {
-                            var h = new HarmonyLib.Harmony("UMMBridge.UMMHook");
-                            h.Patch(patchMethod, new HarmonyMethod(bridgePrefix));
-                            Melon<Bridge>.Logger.Msg(
-                                "0Harmony_UMM::Harmony.Patch() hooked — transpiler bridge active");
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Melon<Bridge>.Logger.Warning(
-                    $"Failed to hook 0Harmony_UMM Harmony.Patch(): {ex.Message}");
-            }
-        }
 
         private static byte[] LoadUmmHarmonyAs_UMM()
         {
@@ -537,12 +490,49 @@ namespace UMMBridge
                     }
                 }
 
+                InjectPatchInfoSync(asmDef);
                 RedirectNativeDetours(asmDef);
 
                 using var outMs = new MemoryStream();
                 asmDef.Write(outMs);
                 return outMs.ToArray();
             }
+        }
+
+        /// <summary>
+        /// Cecil-inject a call to Bridge.OnPatchInfoUpdated at the top of
+        /// 0Harmony_UMM's <c>HarmonySharedState.UpdatePatchInfo(MethodBase,
+        /// MethodInfo, PatchInfo)</c>, where every change to its registry is
+        /// stored: Patch, PatchAll, Unpatch — and JALib's Unpatch, which calls
+        /// it through reflection after its own copy of UpdateWrapper.  For a
+        /// method routed to HarmonyX the bridge brings HarmonyX in step there.
+        /// </summary>
+        private static void InjectPatchInfoSync(AssemblyDefinition asmDef)
+        {
+            var update = asmDef.MainModule.GetType("HarmonyLib.HarmonySharedState")?.Methods.FirstOrDefault(m =>
+                m.Name == "UpdatePatchInfo" && m.IsStatic && m.HasBody &&
+                m.Parameters.Count == 3 &&
+                m.Parameters[0].ParameterType.FullName == "System.Reflection.MethodBase" &&
+                m.Parameters[2].ParameterType.FullName == "HarmonyLib.PatchInfo");
+            if (update == null)
+            {
+                Melon<Bridge>.Logger.Warning(
+                    "0Harmony_UMM: HarmonySharedState.UpdatePatchInfo not found — unpatching a mod patch " +
+                    "that lives on HarmonyX will leave it active");
+                return;
+            }
+
+            // Short forms on purpose: JALib reverse-patches this method into a
+            // two-parameter copy (original, patchInfo) whose transpiler turns
+            // each ldarg.2 into ldarg.1.  A long-form ldarg 2 would slip past
+            // it and read past the end of that copy's arguments.
+            var il = update.Body.GetILProcessor();
+            var first = update.Body.Instructions[0];
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+            il.InsertBefore(first, il.Create(OpCodes.Ldarg_2));
+            il.InsertBefore(first, il.Create(OpCodes.Call,
+                asmDef.MainModule.ImportReference(typeof(Bridge).GetMethod(nameof(Bridge.OnPatchInfoUpdated)))));
+            Melon<Bridge>.Logger.Msg("0Harmony_UMM: registry sync injected into HarmonySharedState.UpdatePatchInfo");
         }
 
         /// <summary>
