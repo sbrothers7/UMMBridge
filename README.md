@@ -18,6 +18,10 @@ UMM ships **0Harmony 2.3.6** (with its own MonoMod) while MelonLoader uses **Har
 | **UpdateWrapper injection** | `CreateClassProcessor`/`PatchAll` path | IL injection at `PatchFunctions.UpdateWrapper()`: in bridge mode a mod patch job is routed to HarmonyX unless that method is already claimed natively |
 | **Harmony.Patch() prefix** | Direct `Harmony.Patch()` calls | HarmonyX prefix on `0Harmony_UMM.Harmony.Patch()`: converts a mod transpiler to HarmonyX, keeps UMM's own core patches native, and joins the native patch table instead of adding a second detour |
 
+### One detour engine
+
+0Harmony_UMM keeps its own patching logic (the 2.3 internals JALib relies on), but it no longer writes detours itself. When it is loaded, `PatchTools.DetourMethod` and `AccessTools.Identifiable`, the only two places that use its bundled MonoMod.Core, are rewritten to call the bridge, which writes the detour with MelonLoader's `MonoMod.RuntimeDetour` (the engine HarmonyX uses). MonoMod.Core in 2.3.x has no Arm64 backend, so this is what lets 0Harmony_UMM, and JALib with it, run on Apple Silicon with the arm64 game. The same hook records native ownership and refuses a native detour on an entry HarmonyX already owns.
+
 ### Patch routing
 
 - **Transpilers (bridge enabled, default)** — `TranspilerBridge` converts `IEnumerable<CodeInstruction>` in both directions: the mod's transpiler still runs against 0Harmony_UMM's own `CodeInstruction` objects, while its patch is registered on **HarmonyX** together with every other patch for that method. Labels and operands are preserved; exception blocks are converted on a best-effort basis. If the method entry is *already* owned natively (a core patch got there first), the patch joins that native table instead — one detour either way.
@@ -39,7 +43,7 @@ When disabled, assemblies containing transpilers keep their `Patch()` calls nati
 
 UMM mods can also run on MelonLoader's HarmonyX alone, like MelonLoader mods: their `0Harmony` reference is left as it is, nothing is routed, and 0Harmony_UMM is not used. The rest of the assembly rewriting (`Mods` → `UMMMods` paths, `Assembly.Location`) still applies. One runtime means every patch stacks and unpatching works.
 
-It turns on by itself when UMM's `0Harmony.dll` is missing, or when 0Harmony_UMM cannot detour on the machine: MonoMod.Core in 0Harmony 2.3.x supports only x86/x64, so this includes Apple Silicon running the arm64 game. To force it, use either:
+It turns on by itself when UMM's `0Harmony.dll` is missing, or when 0Harmony_UMM cannot detour on the machine. That last case only arises when the detour redirect below could not be applied: MonoMod.Core in 0Harmony 2.3.x supports only x86/x64. To force it, use either:
 
 - `HarmonyXOnly=true` in `UMMBridge.cfg`
 - the environment variable `UMMBRIDGE_HARMONYX_ONLY=1`

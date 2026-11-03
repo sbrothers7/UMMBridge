@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using MelonLoader;
+using MonoMod.RuntimeDetour;
 using UnityEngine;
 using UnityModManagerNet;
 
@@ -49,16 +50,46 @@ public class Bridge : MelonPlugin
         Trace($"own {Describe(original)}=(native:{native})");
     }
 
+    private static readonly Dictionary<MethodBase, NativeDetour> NativeDetours = new();
+
     /// <summary>
-    /// Called from the Cecil-injected guard at the top of 0Harmony_UMM's
-    /// PatchTools.DetourMethod(), which every native detour goes through —
-    /// including ones that bypass Harmony.Patch() and the routed UpdateWrapper
-    /// (JALib's [JAPatch]).  Returns false to skip the detour when HarmonyX
-    /// already owns the method entry; otherwise records native ownership so
-    /// later mod patches join the native table instead of adding a second
-    /// detour.
+    /// The body of 0Harmony_UMM's PatchTools.DetourMethod() (Cecil-replaced),
+    /// which every native detour goes through — including ones that bypass
+    /// Harmony.Patch() and the routed UpdateWrapper (JALib's [JAPatch]).  Same
+    /// job as the original: drop the previous detour on this method and point
+    /// its entry at the new replacement, but written by MelonLoader's
+    /// MonoMod.RuntimeDetour, which also works on Arm64.
     /// </summary>
-    public static bool AllowNativeDetour(MethodBase original)
+    public static void DetourNative(MethodBase original, MethodBase replacement)
+    {
+        if (!AllowNativeDetour(original)) return;
+        // ponytail: a raw jump like 2.3's own detour, so a HarmonyX ILHook on
+        // the same method is still trampled (AllowNativeDetour stops that case).
+        // A RuntimeDetour Detour would join HarmonyX's chain instead.
+        lock (NativeDetours)
+        {
+            if (NativeDetours.TryGetValue(original, out var previous)) previous.Dispose();
+            NativeDetours[original] = new NativeDetour(original, replacement);
+        }
+    }
+
+    /// <summary>
+    /// The body of 0Harmony_UMM's AccessTools.Identifiable() (Cecil-replaced).
+    /// On Mono, MonoMod.Core only maps a method to the instance it pinned for a
+    /// detour — none now — and otherwise drops the ReflectedType, so a method
+    /// looked up through a derived type keys the same patch state.
+    /// </summary>
+    public static MethodInfo Identifiable(MethodInfo method)
+        => method?.DeclaringType is { } type && method.ReflectedType != type
+            ? MethodBase.GetMethodFromHandle(method.MethodHandle, type.TypeHandle) as MethodInfo ?? method
+            : method;
+
+    /// <summary>
+    /// Returns false to skip a native detour when HarmonyX already owns the
+    /// method entry; otherwise records native ownership so later mod patches
+    /// join the native table instead of adding a second detour.
+    /// </summary>
+    internal static bool AllowNativeDetour(MethodBase original)
     {
         // Where 0Harmony_UMM cannot detour at all the detour is about to throw;
         // claiming the entry would only pull later mod patches off HarmonyX.

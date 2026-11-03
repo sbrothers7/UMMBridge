@@ -537,7 +537,7 @@ namespace UMMBridge
                     }
                 }
 
-                InjectNativeDetourGuard(asmDef);
+                RedirectNativeDetours(asmDef);
 
                 using var outMs = new MemoryStream();
                 asmDef.Write(outMs);
@@ -546,70 +546,80 @@ namespace UMMBridge
         }
 
         /// <summary>
-        /// Cecil-inject a guard at the top of 0Harmony_UMM's
-        /// <c>PatchTools.DetourMethod(MethodBase, MethodBase)</c>.
+        /// Cecil-replace the only two places where 0Harmony_UMM reaches its own
+        /// MonoMod.Core: <c>PatchTools.DetourMethod(MethodBase, MethodBase)</c>
+        /// and <c>AccessTools.Identifiable(MethodInfo)</c>.  Both now call into
+        /// Bridge, which writes the detour with MelonLoader's
+        /// MonoMod.RuntimeDetour — the engine HarmonyX uses.  0Harmony_UMM keeps
+        /// its own 2.3 internals (what JALib needs) but no longer needs a
+        /// MonoMod.Core backend for the CPU, which 2.3.x lacks for Arm64.
         ///
-        /// <para>Every native detour ends there: UpdateWrapper, ReversePatch,
-        /// and also code that never reaches the routed UpdateWrapper.  JALib
-        /// applies [JAPatch] through its own reverse-patched copy of
-        /// UpdateWrapper (the router prologue cut off) and records the result
-        /// through its own copies of HarmonySharedState.UpdatePatchInfo, so
-        /// neither of those ever sees its patches — but the copy still calls the
-        /// real DetourMethod.  The guard records native ownership there, so later
-        /// mod patches join the native table, and refuses a native detour on an
-        /// entry HarmonyX already owns.</para>
+        /// <para>Every native detour ends in DetourMethod: UpdateWrapper,
+        /// ReversePatch, and also code that never reaches the routed
+        /// UpdateWrapper.  JALib applies [JAPatch] through its own reverse-patched
+        /// copy of UpdateWrapper (the router prologue cut off) and records the
+        /// result through its own copies of HarmonySharedState.UpdatePatchInfo,
+        /// so neither of those ever sees its patches — but the copy still calls
+        /// the real DetourMethod.  Bridge.DetourNative records native ownership
+        /// there, so later mod patches join the native table, and refuses a
+        /// native detour on an entry HarmonyX already owns.</para>
         /// </summary>
-        private static void InjectNativeDetourGuard(AssemblyDefinition asmDef)
+        private static void RedirectNativeDetours(AssemblyDefinition asmDef)
         {
-            var guard = typeof(Bridge).GetMethod(
-                nameof(Bridge.AllowNativeDetour),
-                BindingFlags.Public | BindingFlags.Static,
-                null, new[] { typeof(MethodBase) }, null);
-
-            var detour = asmDef.MainModule.GetType("HarmonyLib.PatchTools")?.Methods.FirstOrDefault(m =>
+            var module = asmDef.MainModule;
+            var detour = module.GetType("HarmonyLib.PatchTools")?.Methods.FirstOrDefault(m =>
                 m.Name == "DetourMethod" && m.IsStatic && m.HasBody &&
                 m.ReturnType.FullName == "System.Void" &&
                 m.Parameters.Count == 2 &&
                 m.Parameters.All(p => p.ParameterType.FullName == "System.Reflection.MethodBase"));
+            var identifiable = module.GetType("HarmonyLib.AccessTools")?.Methods.FirstOrDefault(m =>
+                m.Name == "Identifiable" && m.IsStatic && m.HasBody &&
+                m.Parameters.Count == 1 &&
+                m.Parameters[0].ParameterType.FullName == "System.Reflection.MethodInfo");
 
-            if (guard == null || detour == null)
+            if (detour == null || identifiable == null)
             {
                 Melon<Bridge>.Logger.Warning(
-                    "0Harmony_UMM: PatchTools.DetourMethod(MethodBase, MethodBase) not found — " +
-                    "native detours made outside Harmony.Patch()/PatchAll() (JALib) go untracked");
+                    "0Harmony_UMM: PatchTools.DetourMethod or AccessTools.Identifiable not found — " +
+                    "native detours use 0Harmony_UMM's own MonoMod.Core and go untracked");
                 return;
             }
 
-            if (detour.Body.Instructions.Any(inst =>
-                    inst.OpCode == OpCodes.Call &&
-                    inst.Operand is MethodReference call &&
-                    call.Name == nameof(Bridge.AllowNativeDetour)))
-                return;
+            ReplaceBody(detour, typeof(Bridge).GetMethod(nameof(Bridge.DetourNative)));
+            ReplaceBody(identifiable, typeof(Bridge).GetMethod(nameof(Bridge.Identifiable)));
+            _detoursRedirected = true;
+            Melon<Bridge>.Logger.Msg("0Harmony_UMM: native detours redirected to MelonLoader's MonoMod.RuntimeDetour");
+        }
 
-            // ldarg.0 → AllowNativeDetour → brtrue FIRST; ret
-            var il = detour.Body.GetILProcessor();
-            var first = detour.Body.Instructions[0];
-            il.InsertBefore(first, il.Create(OpCodes.Ldarg, detour.Parameters[0]));
-            il.InsertBefore(first, il.Create(OpCodes.Call, asmDef.MainModule.ImportReference(guard)));
-            il.InsertBefore(first, il.Create(OpCodes.Brtrue, first));
-            il.InsertBefore(first, il.Create(OpCodes.Ret));
+        private static bool _detoursRedirected;
 
-            Melon<Bridge>.Logger.Msg("0Harmony_UMM: native detour guard injected into PatchTools.DetourMethod");
+        /// <summary>Body becomes: load every argument, call target, ret.</summary>
+        private static void ReplaceBody(MethodDefinition method, MethodInfo target)
+        {
+            var body = method.Body;
+            body.Instructions.Clear();
+            body.ExceptionHandlers.Clear();
+            body.Variables.Clear();
+            var il = body.GetILProcessor();
+            foreach (var p in method.Parameters) il.Emit(OpCodes.Ldarg, p);
+            il.Emit(OpCodes.Call, method.Module.ImportReference(target));
+            il.Emit(OpCodes.Ret);
         }
 
         /// <summary>
         /// False when 0Harmony_UMM cannot write a detour on this machine.
-        /// MonoMod.Core in 0Harmony 2.3.x only supports x86/x64: MacOSSystem
-        /// throws NotImplementedException for anything but x86_64, and
-        /// PlatformTriple.CreateCurrentArchitecture does the same for Arm/Arm64.
-        /// So on Apple Silicon running the arm64 game every native patch fails —
-        /// UMM core patches, JALib's reverse patches, anything not routed to
-        /// HarmonyX.
+        /// Only checked when the redirect above could not be applied: then
+        /// 0Harmony_UMM's own MonoMod.Core does the detours, and in 0Harmony
+        /// 2.3.x it only supports x86/x64 (MacOSSystem throws
+        /// NotImplementedException for anything but x86_64, and
+        /// PlatformTriple.CreateCurrentArchitecture does the same for
+        /// Arm/Arm64).
         /// </summary>
         internal static bool NativeDetoursWork { get; private set; } = true;
 
         private static void ProbeNativeDetours()
         {
+            if (_detoursRedirected) return;
             try
             {
                 _ummHarmony.GetType("MonoMod.Core.DetourFactory")

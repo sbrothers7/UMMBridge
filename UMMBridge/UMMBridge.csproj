@@ -77,6 +77,10 @@
       <HintPath>$(GameRootDir)MelonLoader/$(MelonLoaderTarget)/Mono.Cecil.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="MonoMod.RuntimeDetour">
+      <HintPath>$(GameRootDir)MelonLoader/$(MelonLoaderTarget)/MonoMod.RuntimeDetour.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Mono.Cecil.Rocks">
       <HintPath>$(GameRootDir)MelonLoader/$(MelonLoaderTarget)/Mono.Cecil.Rocks.dll</HintPath>
       <Private>False</Private>
@@ -97,6 +101,9 @@
     </Reference>
     <Reference Update="Mono.Cecil.Rocks" Condition="!Exists('$(GameRootDir)MelonLoader/$(MelonLoaderTarget)/Mono.Cecil.Rocks.dll')">
       <HintPath>$(LibsMelonLoaderDir)Mono.Cecil.Rocks.dll</HintPath>
+    </Reference>
+    <Reference Update="MonoMod.RuntimeDetour" Condition="!Exists('$(GameRootDir)MelonLoader/$(MelonLoaderTarget)/MonoMod.RuntimeDetour.dll')">
+      <HintPath>$(LibsMelonLoaderDir)MonoMod.RuntimeDetour.dll</HintPath>
     </Reference>
     <Reference Update="UnityEngine.CoreModule" Condition="!Exists('$(UnityAssembliesDir)UnityEngine.CoreModule.dll')">
       <HintPath>$(LibsDir)UnityEngine.CoreModule.dll</HintPath>
