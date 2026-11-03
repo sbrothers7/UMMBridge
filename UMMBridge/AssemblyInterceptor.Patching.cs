@@ -233,6 +233,91 @@ namespace UMMBridge
             return modified;
         }
 
+        // ── JALib pre-claim ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Claims every game method a JALib mod targets with [JAPatch] for the
+        /// native runtime, before UMM loads any mod.
+        ///
+        /// <para>JALib boots on a worker thread after UMM has loaded every other
+        /// mod, so a bridged mod has usually put a HarmonyX detour on a shared
+        /// method (scrFloor.Start, scnGame.Play, ...) before JALib gets there,
+        /// and the DetourMethod guard can then only refuse JALib's patch.
+        /// Claiming the entry up front sends those earlier patches to the native
+        /// table instead; JALib reads that table back through
+        /// HarmonySharedState.GetPatchInfo and keeps them when it re-detours —
+        /// one runtime, one detour.</para>
+        /// </summary>
+        internal static void ClaimJALibPatchTargets()
+        {
+            // Claiming for a runtime that cannot detour would break mods that
+            // work today on HarmonyX.
+            if (_ummHarmony == null || !NativeDetoursWork || !Directory.Exists(ModsRootPath)) return;
+
+            string[] files;
+            try { files = Directory.GetFiles(ModsRootPath, "*.dll", SearchOption.AllDirectories); }
+            catch { return; }
+
+            var claimed = new HashSet<string>();
+            foreach (var file in files)
+            {
+                try
+                {
+                    // Decoding [JAPatch] resolves JALib for its PatchType enum.
+                    // Both are disposed per file: a held handle on JALib.dll would
+                    // block JALib's own updater on Windows.
+                    using var resolver = CreateModCecilResolver(file);
+                    using var asmDef = AssemblyDefinition.ReadAssembly(
+                        file, new ReaderParameters { AssemblyResolver = resolver });
+
+                    if (asmDef.Name.Name != "JALib" &&
+                        asmDef.MainModule.AssemblyReferences.All(r => r.Name != "JALib"))
+                        continue;
+
+                    foreach (var type in asmDef.MainModule.GetAllTypes())
+                        foreach (var method in type.Methods)
+                            foreach (var attr in method.CustomAttributes)
+                            {
+                                if (attr.AttributeType.FullName != "JALib.Core.Patch.JAPatchAttribute") continue;
+
+                                // [JAPatch(Type or string class, string method, PatchType, bool)]
+                                var args = attr.ConstructorArguments;
+                                var typeName = args[0].Value switch
+                                {
+                                    TypeReference t => t.FullName.Replace('/', '+'),
+                                    string s => s,
+                                    _ => null,
+                                };
+                                if (typeName == null || args[1].Value is not string methodName) continue;
+
+                                var target = HarmonyLib.AccessTools.TypeByName(typeName);
+                                if (target == null) continue;
+
+                                // ponytail: claims every overload of that name (ArgumentTypes and
+                                // GenericName ignored); an extra claim only moves that method's
+                                // later mod patches to the native table.
+                                foreach (var m in HarmonyLib.AccessTools.GetDeclaredMethods(target))
+                                    if (m.Name == methodName && Bridge.ClaimNative(m))
+                                        claimed.Add(Bridge.Describe(m));
+                            }
+                }
+                catch (BadImageFormatException)
+                {
+                    // A native library shipped next to a mod.
+                }
+                catch (Exception e)
+                {
+                    Melon<Bridge>.Logger.Warning(
+                        $"Claim: could not read [JAPatch] targets from {Path.GetFileName(file)}: {e.Message}");
+                }
+            }
+
+            if (claimed.Count > 0)
+                Melon<Bridge>.Logger.Msg(
+                    $"Claimed {claimed.Count} method(s) for JALib on 0Harmony_UMM: " +
+                    string.Join(", ", claimed));
+        }
+
         // ── Cecil assembly resolution ───────────────────────────────────
 
         /// <summary>

@@ -50,6 +50,51 @@ public class Bridge : MelonPlugin
     }
 
     /// <summary>
+    /// Called from the Cecil-injected guard at the top of 0Harmony_UMM's
+    /// PatchTools.DetourMethod(), which every native detour goes through —
+    /// including ones that bypass Harmony.Patch() and the routed UpdateWrapper
+    /// (JALib's [JAPatch]).  Returns false to skip the detour when HarmonyX
+    /// already owns the method entry; otherwise records native ownership so
+    /// later mod patches join the native table instead of adding a second
+    /// detour.
+    /// </summary>
+    public static bool AllowNativeDetour(MethodBase original)
+    {
+        // Where 0Harmony_UMM cannot detour at all the detour is about to throw;
+        // claiming the entry would only pull later mod patches off HarmonyX.
+        if (original == null || !AssemblyInterceptor.NativeDetoursWork || IsNativeOwned(original)) return true;
+
+        if (HasHarmonyXPatches(original))
+        {
+            Melon<Bridge>.Logger.Warning(
+                $"Native detour refused: HarmonyX owns \"{Describe(original)}\" " +
+                $"(caller=[{GetCallingModName()}]) — that patch was NOT applied");
+            return false;
+        }
+
+        SetOwnership(original, true);
+        return true;
+    }
+
+    /// <summary>
+    /// Marks a method native before anything patched it, so every mod patch
+    /// that arrives later joins the native table.  Never takes an entry
+    /// HarmonyX already owns.
+    /// </summary>
+    internal static bool ClaimNative(MethodBase method)
+    {
+        if (HasHarmonyXPatches(method))
+        {
+            Melon<Bridge>.Logger.Warning(
+                $"Claim: HarmonyX already owns \"{Describe(method)}\" — left on HarmonyX");
+            return false;
+        }
+
+        MarkNativeOwner(method);
+        return IsNativeOwned(method);
+    }
+
+    /// <summary>
     /// Called from the Cecil-injected check in 0Harmony_UMM's
     /// PatchFunctions.UpdateWrapper().  Returns true when the patch must not
     /// claim a native detour — either because HarmonyX already owns the method
@@ -550,6 +595,8 @@ public class Bridge : MelonPlugin
 
         var harmony = new HarmonyLib.Harmony("UMMBridge");
         harmony.Patch(OriginalModsPathGetter, new HarmonyMethod(RedirectMethod));
+
+        AssemblyInterceptor.ClaimJALibPatchTargets();
 
         LoggerInstance.Msg("Starting UMM");
         UnityModManager.Start();
