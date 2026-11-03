@@ -6,6 +6,8 @@ Run [UnityModManager](https://github.com/newman55/unity-mod-manager) (UMM) mods 
 
 UMMBridge loads UMM inside MelonLoader, transparently bridging the two mod ecosystems. It intercepts `UnityModManager.modsPath`, redirecting to `UMMMods/`, then boots UMM and its UI alongside MelonLoader's plugin pipeline.
 
+Mods that hardcode a `"Mods"` path instead of asking UMM get it rewritten to `"UMMMods"` when they load. An assembly that names `UMMMods` itself is left alone, because it already tells native UMM's `Mods/` and this layout's `UMMMods/` apart, and URLs are never rewritten.
+
 ## Dual-Harmony Architecture
 
 UMM ships **0Harmony 2.3.6** (with its own MonoMod) while MelonLoader uses **HarmonyX** (a different MonoMod). Two MonoMod runtimes cannot write JMP detours on the same method entry. UMMBridge resolves this by keeping every UMM **mod** patch on a single runtime — HarmonyX — including transpilers, which are converted at the boundary. The one exception is a method whose entry a UMM core patch already claimed natively: later mod patches (transpilers included) join that native table instead of getting a detour of their own.

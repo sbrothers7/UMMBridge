@@ -107,11 +107,21 @@ namespace UMMBridge
                 }
                 catch { }
 
+                // The "Mods" rewrite adapts mods that assume UMM's folder is
+                // Mods/.  A mod that names UMMMods itself does not: it tells
+                // native UMM's Mods/ and this layout's UMMMods/ apart (Topaz's
+                // and Sapphire's duplicate-install check), so its "Mods" means
+                // the real Mods/ folder and is left as written.
+                var rewritePaths = !NamesModsDir(asmDef);
+                if (!rewritePaths)
+                    Melon<Bridge>.Logger.Msg(
+                        $"{Path.GetFileName(filePath)} names {ModsDirName} itself — its \"Mods\" paths are left as written");
+
                 foreach (var type in asmDef.MainModule.GetAllTypes())
                     foreach (var method in type.Methods)
                     {
                         if (!method.HasBody) continue;
-                        modified |= RewriteHardcodedPaths(method);
+                        if (rewritePaths) modified |= RewriteHardcodedPaths(method);
                         if (getLocationHelper != null)
                             modified |= RewriteAssemblyGetLocation(method, getLocationHelper);
                     }
@@ -152,12 +162,20 @@ namespace UMMBridge
             return modified;
         }
 
+        private static bool NamesModsDir(AssemblyDefinition asmDef)
+            => asmDef.MainModule.GetAllTypes()
+                .SelectMany(type => type.Methods)
+                .Where(method => method.HasBody)
+                .SelectMany(method => method.Body.Instructions)
+                .Any(inst => inst.OpCode == OpCodes.Ldstr && inst.Operand is string s && s.Contains(ModsDirName));
+
         private static bool RewriteHardcodedPaths(MethodDefinition method)
         {
             bool modified = false;
             foreach (var inst in method.Body.Instructions)
             {
-                if (inst.OpCode != OpCodes.Ldstr || inst.Operand is not string s)
+                // A URL is never a filesystem path, whatever its segments are called.
+                if (inst.OpCode != OpCodes.Ldstr || inst.Operand is not string s || s.Contains("://"))
                     continue;
 
                 string replaced = null;
