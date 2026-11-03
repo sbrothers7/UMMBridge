@@ -54,15 +54,19 @@ namespace UMMBridge
 
         internal static void Initialize()
         {
-            Enabled = ReadEnabled();
+            Enabled = ReadSetting("UMMBRIDGE_TRANSPILER_BRIDGE", "TranspilerBridge", true);
             Log($"Transpiler bridge: {(Enabled ? "enabled" : "disabled")}");
         }
 
-        private static bool ReadEnabled()
+        /// <summary>
+        /// A boolean switch: the environment variable wins, then
+        /// <c>key=value</c> in UMMBridge.cfg next to the plugin, then the fallback.
+        /// </summary>
+        internal static bool ReadSetting(string envName, string key, bool fallback)
         {
             try
             {
-                var env = Environment.GetEnvironmentVariable("UMMBRIDGE_TRANSPILER_BRIDGE");
+                var env = Environment.GetEnvironmentVariable(envName);
                 if (!string.IsNullOrEmpty(env))
                     return !IsFalse(env);
             }
@@ -80,15 +84,14 @@ namespace UMMBridge
                         if (line.Length == 0 || line[0] == '#' || line[0] == ';') continue;
                         var eq = line.IndexOf('=');
                         if (eq <= 0) continue;
-                        var key = line.Substring(0, eq).Trim();
-                        if (!key.Equals("TranspilerBridge", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!line.Substring(0, eq).Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
                         return !IsFalse(line.Substring(eq + 1).Trim());
                     }
                 }
             }
             catch { }
 
-            return true;
+            return fallback;
         }
 
         private static bool IsFalse(string value)

@@ -58,7 +58,8 @@ namespace UMMBridge
                 // and no AccessTools.MethodDelegate(MethodInfo, object, bool, Type[]).
                 // Serve the 2.3.6 surface the mod was built against instead of
                 // letting it bind HarmonyX and die on MissingMethodException.
-                if (args.RequestingAssembly != null &&
+                // In HarmonyX-only mode an unrewritten reference is the point.
+                if (_ummHarmony != null && args.RequestingAssembly != null &&
                     IsRegisteredModAssembly(args.RequestingAssembly))
                 {
                     Melon<Bridge>.Logger.Warning(
@@ -305,23 +306,80 @@ namespace UMMBridge
                 .FirstOrDefault(a => a.GetName().Name == "0Harmony" &&
                                      a.GetName().Version.Major >= 2);
 
-            var ummHarmonyBytes = LoadUmmHarmonyAs_UMM();
-            if (ummHarmonyBytes == null)
+            string harmonyXOnlyReason = null;
+            if (TranspilerBridge.ReadSetting("UMMBRIDGE_HARMONYX_ONLY", "HarmonyXOnly", false))
             {
-                Melon<Bridge>.Logger.Warning(
-                    "UMM 0Harmony.dll not found alongside UnityModManager.dll — " +
-                    "mods using Harmony 2.x internals will NOT load.  Install/restore UnityModManager.");
-                return;
+                harmonyXOnlyReason = "HarmonyXOnly is set";
             }
-            _ummHarmony = Assembly.Load(ummHarmonyBytes);
-            Melon<Bridge>.Logger.Msg($"Loaded UMM 0Harmony as 0Harmony_UMM v{_ummHarmony.GetName().Version}");
-            ProbeNativeDetours();
+            else if (LoadUmmHarmonyAs_UMM() is not { } ummHarmonyBytes)
+            {
+                harmonyXOnlyReason = "UMM 0Harmony.dll not found next to UnityModManager.dll";
+            }
+            else
+            {
+                _ummHarmony = Assembly.Load(ummHarmonyBytes);
+                Melon<Bridge>.Logger.Msg($"Loaded UMM 0Harmony as 0Harmony_UMM v{_ummHarmony.GetName().Version}");
+                ProbeNativeDetours();
+                if (!NativeDetoursWork)
+                {
+                    // Every 0Harmony_UMM call would fail here — routed patches
+                    // too, since PatchClassProcessor still records them through
+                    // its own HarmonySharedState, which needs MonoMod.Core.
+                    _ummHarmony = null;
+                    harmonyXOnlyReason = "0Harmony_UMM cannot detour on this platform";
+                }
+            }
 
-            // Hook 0Harmony_UMM's Harmony.Patch() via HarmonyX prefix.
-            // Prefix_UMMPatch hands the patch to HarmonyX whenever HarmonyX
-            // already owns the method entry (and for a UMM mod patch that
-            // carries a transpiler), so both runtimes' patches coexist on one
-            // detour instead of racing for the same JMP.
+            if (harmonyXOnlyReason != null)
+            {
+                HarmonyXOnly = true;
+                Melon<Bridge>.Logger.Msg(
+                    $"HarmonyX-only mode ({harmonyXOnlyReason}): UMM mods keep their 0Harmony reference " +
+                    "and patch through MelonLoader's HarmonyX");
+            }
+            else
+            {
+                HookUmmHarmonyPatch();
+            }
+
+            try
+            {
+                var h = new HarmonyLib.Harmony("UMMBridge.AssemblyInterceptor");
+                var loadFrom = AccessTools.Method(typeof(Assembly), "LoadFrom", new[] { typeof(string) });
+                var prefix = AccessTools.Method(typeof(AssemblyInterceptor), nameof(Prefix_LoadFrom));
+
+                if (loadFrom != null && prefix != null)
+                {
+                    h.Patch(loadFrom, new HarmonyMethod(prefix));
+                    Melon<Bridge>.Logger.Msg(
+                        "Assembly.LoadFrom interceptor active");
+                }
+            }
+            catch (Exception ex)
+            {
+                Melon<Bridge>.Logger.Warning($"Interceptor initialization failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// True when UMM mods run on MelonLoader's HarmonyX alone: their
+        /// 0Harmony reference is left as it is, nothing is routed and
+        /// 0Harmony_UMM is not used.  Set when it is asked for, when UMM's
+        /// 0Harmony.dll is missing, or when 0Harmony_UMM cannot detour on this
+        /// machine (Apple Silicon).  Mods that call into Harmony internals
+        /// (JALib) or the few 2.3 APIs HarmonyX lacks do not work in this mode.
+        /// </summary>
+        internal static bool HarmonyXOnly { get; private set; }
+
+        /// <summary>
+        /// Hook 0Harmony_UMM's Harmony.Patch() via HarmonyX prefix.
+        /// Prefix_UMMPatch hands the patch to HarmonyX whenever HarmonyX
+        /// already owns the method entry (and for a UMM mod patch that
+        /// carries a transpiler), so both runtimes' patches coexist on one
+        /// detour instead of racing for the same JMP.
+        /// </summary>
+        private static void HookUmmHarmonyPatch()
+        {
             try
             {
                 var ummHarmonyType = _ummHarmony.GetType("HarmonyLib.Harmony");
@@ -353,24 +411,6 @@ namespace UMMBridge
             {
                 Melon<Bridge>.Logger.Warning(
                     $"Failed to hook 0Harmony_UMM Harmony.Patch(): {ex.Message}");
-            }
-
-            try
-            {
-                var h = new HarmonyLib.Harmony("UMMBridge.AssemblyInterceptor");
-                var loadFrom = AccessTools.Method(typeof(Assembly), "LoadFrom", new[] { typeof(string) });
-                var prefix = AccessTools.Method(typeof(AssemblyInterceptor), nameof(Prefix_LoadFrom));
-
-                if (loadFrom != null && prefix != null)
-                {
-                    h.Patch(loadFrom, new HarmonyMethod(prefix));
-                    Melon<Bridge>.Logger.Msg(
-                        "Assembly.LoadFrom interceptor active");
-                }
-            }
-            catch (Exception ex)
-            {
-                Melon<Bridge>.Logger.Warning($"Interceptor initialization failed: {ex.Message}");
             }
         }
 
@@ -581,8 +621,7 @@ namespace UMMBridge
                 NativeDetoursWork = false;
                 Melon<Bridge>.Logger.Warning(
                     $"0Harmony_UMM cannot detour on this platform ({(e.InnerException ?? e).GetType().Name}) — " +
-                    "native patches (UMM core, JALib and JALib-based mods) will fail; " +
-                    "bridged UMM mod patches still run on HarmonyX");
+                    "JALib and JALib-based mods will not work");
             }
         }
 

@@ -35,6 +35,17 @@ Transpiler bridging is enabled by default. To restore the previous build-time ro
 
 When disabled, assemblies containing transpilers keep their `Patch()` calls native and are handled by 0Harmony_UMM, exactly like earlier versions.
 
+#### HarmonyX-only mode
+
+UMM mods can also run on MelonLoader's HarmonyX alone, like MelonLoader mods: their `0Harmony` reference is left as it is, nothing is routed, and 0Harmony_UMM is not used. The rest of the assembly rewriting (`Mods` → `UMMMods` paths, `Assembly.Location`) still applies. One runtime means every patch stacks and unpatching works.
+
+It turns on by itself when UMM's `0Harmony.dll` is missing, or when 0Harmony_UMM cannot detour on the machine: MonoMod.Core in 0Harmony 2.3.x supports only x86/x64, so this includes Apple Silicon running the arm64 game. To force it, use either:
+
+- `HarmonyXOnly=true` in `UMMBridge.cfg`
+- the environment variable `UMMBRIDGE_HARMONYX_ONLY=1`
+
+Mods that reach into Harmony's internals (JALib and the mods built on it) do not work in this mode, and neither do mods that call the few 2.3 APIs HarmonyX lacks (`PatchClassProcessor.Unpatch`, `HarmonyLib.AccessToolsExtensions`, `AccessTools.MethodDelegate(MethodInfo, object, bool, Type[])`).
+
 ### Coexistence
 
 The following table summarizes what happens when two patches target the same method:

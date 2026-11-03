@@ -53,7 +53,11 @@ namespace UMMBridge
                 var harmonyRef = asmDef.MainModule.AssemblyReferences
                     .FirstOrDefault(r => r.Name == "0Harmony");
 
-                if (harmonyRef != null)
+                if (harmonyRef != null && HarmonyXOnly)
+                {
+                    Melon<Bridge>.Logger.Msg($"{Path.GetFileName(filePath)} → HarmonyX");
+                }
+                else if (harmonyRef != null)
                 {
                     harmonyRef.Name = "0Harmony_UMM";
                     harmonyRef.PublicKeyToken = Array.Empty<byte>();
