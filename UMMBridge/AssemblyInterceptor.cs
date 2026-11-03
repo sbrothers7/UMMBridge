@@ -559,11 +559,12 @@ namespace UMMBridge
 
         /// <summary>
         /// False when 0Harmony_UMM cannot write a detour on this machine.
-        /// MonoMod.Core in 0Harmony 2.3.x has no Arm/Arm64 backend
-        /// (PlatformTriple.CreateCurrentArchitecture throws
-        /// NotImplementedException), so on Apple Silicon running the arm64 game
-        /// every native patch fails — UMM core patches, JALib's reverse patches,
-        /// anything that is not routed to HarmonyX.
+        /// MonoMod.Core in 0Harmony 2.3.x only supports x86/x64: MacOSSystem
+        /// throws NotImplementedException for anything but x86_64, and
+        /// PlatformTriple.CreateCurrentArchitecture does the same for Arm/Arm64.
+        /// So on Apple Silicon running the arm64 game every native patch fails —
+        /// UMM core patches, JALib's reverse patches, anything not routed to
+        /// HarmonyX.
         /// </summary>
         internal static bool NativeDetoursWork { get; private set; } = true;
 

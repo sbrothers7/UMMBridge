@@ -69,6 +69,7 @@ public class Bridge : MelonPlugin
             Melon<Bridge>.Logger.Warning(
                 $"Native detour refused: HarmonyX owns \"{Describe(original)}\" " +
                 $"(caller=[{GetCallingModName()}]) — that patch was NOT applied");
+            Trace(new StackTrace(1, false).ToString());
             return false;
         }
 
